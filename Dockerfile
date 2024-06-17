@@ -1,54 +1,62 @@
-FROM mcr.microsoft.com/vscode/devcontainers/python:0-3.11
+ARG BUILD_FROM
+FROM ${BUILD_FROM}
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# Synchronize with homeassistant/core.py:async_stop
+ENV \
+    S6_SERVICES_GRACETIME=220000
 
-# Uninstall pre-installed formatting and linting tools
-# They would conflict with our pinned versions
-RUN \
-    pipx uninstall black \
-    && pipx uninstall pydocstyle \
-    && pipx uninstall pycodestyle \
-    && pipx uninstall mypy \
-    && pipx uninstall pylint
-
-RUN \
-    curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # Additional library needed by some tests and accordingly by VScode Tests Discovery
-        bluez \
-        libudev-dev \
-        libavformat-dev \
-        libavcodec-dev \
-        libavdevice-dev \
-        libavutil-dev \
-        libswscale-dev \
-        libswresample-dev \
-        libavfilter-dev \
-        libpcap-dev \
-        libturbojpeg0 \
-        libyaml-dev \
-        libxml2 \
-        git \
-        cmake \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+ARG QEMU_CPU
 
 WORKDIR /usr/src
 
-# Setup hass-release
-RUN git clone --depth 1 https://github.com/home-assistant/hass-release \
-    && pip3 install -e hass-release/
+## Setup Home Assistant Core dependencies
+COPY requirements.txt homeassistant/
+COPY homeassistant/package_constraints.txt homeassistant/homeassistant/
+RUN \
+    pip3 install \
+        --no-cache-dir \
+        --no-index \
+        --only-binary=:all: \
+        --find-links "${WHEELS_LINKS}" \
+        -r homeassistant/requirements.txt
 
-WORKDIR /workspaces
+COPY requirements_all.txt home_assistant_frontend-* home_assistant_intents-* homeassistant/
+RUN \
+    if ls homeassistant/home_assistant_frontend*.whl 1> /dev/null 2>&1; then \
+        pip3 install \
+            --no-cache-dir \
+            --no-index \
+            homeassistant/home_assistant_frontend-*.whl; \
+    fi \
+    && if ls homeassistant/home_assistant_intents*.whl 1> /dev/null 2>&1; then \
+        pip3 install \
+            --no-cache-dir \
+            --no-index \
+            homeassistant/home_assistant_intents-*.whl; \
+    fi \
+    && \
+        LD_PRELOAD="/usr/local/lib/libjemalloc.so.2" \
+        MALLOC_CONF="background_thread:true,metadata_thp:auto,dirty_decay_ms:20000,muzzy_decay_ms:20000" \
+        pip3 install \
+            --no-cache-dir \
+            --no-index \
+            --only-binary=:all: \
+            --find-links "${WHEELS_LINKS}" \
+            -r homeassistant/requirements_all.txt
 
-# Install Python dependencies from requirements
-COPY requirements.txt ./
-COPY homeassistant/package_constraints.txt homeassistant/package_constraints.txt
-RUN pip3 install -r requirements.txt
-COPY requirements_test.txt requirements_test_pre_commit.txt ./
-RUN pip3 install -r requirements_test.txt
-RUN rm -rf requirements.txt requirements_test.txt requirements_test_pre_commit.txt homeassistant/
+## Setup Home Assistant Core
+COPY . homeassistant/
+RUN \
+    pip3 install \
+        --no-cache-dir \
+        --no-index \
+        --only-binary=:all: \
+        --find-links "${WHEELS_LINKS}" \
+        -e ./homeassistant \
+    && python3 -m compileall \
+        homeassistant/homeassistant
 
-# Set the default shell to bash instead of sh
-ENV SHELL /bin/bash
+# Home Assistant S6-Overlay
+COPY rootfs /
+
+WORKDIR /config
